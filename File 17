@@ -1,0 +1,208 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+from skimage.filters import gaussian
+import pandas as pd
+
+## 1. Synthetic InSAR Data Generation
+
+def generate_synthetic_insar_data(size=1000, time_steps=10, noise_level=0.1):
+    """
+    Generate synthetic InSAR data with ground deformation patterns
+    
+    Parameters:
+    - size: number of points to generate
+    - time_steps: number of time intervals
+    - noise_level: amount of noise to add
+    
+    Returns:
+    - DataFrame with synthetic InSAR measurements
+    """
+    
+    # Generate random locations
+    np.random.seed(42)
+    x = np.random.uniform(0, 10, size)
+    y = np.random.uniform(0, 10, size)
+    
+    # Create a synthetic subsidence bowl
+    center_x, center_y = 5, 5
+    distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+    
+    data = []
+    for t in range(time_steps):
+        # Time-dependent deformation (subsidence bowl that grows with time)
+        deformation = -0.1 * t * np.exp(-distance/3)
+        
+        # Add some noise
+        noise = noise_level * np.random.normal(size=size)
+        
+        # Simulate phase (wrapped between -π and π)
+        phase = (deformation + noise) % (2*np.pi)
+        phase[phase > np.pi] -= 2*np.pi
+        
+        # Add atmospheric effects (spatially correlated noise)
+        atmospheric = gaussian(np.random.normal(size=(10,10)), sigma=2)
+        atmospheric = atmospheric.flatten()[:size] * 0.5
+        
+        # Final interferogram phase
+        phase += atmospheric
+        
+        # Create time step data
+        time_data = np.column_stack([x, y, np.full(size, t), phase, deformation])
+        data.append(time_data)
+    
+    # Combine all time steps
+    all_data = np.vstack(data)
+    columns = ['x', 'y', 'time', 'phase', 'true_deformation']
+    df = pd.DataFrame(all_data, columns=columns)
+    
+    return df
+
+# Generate synthetic data
+insar_df = generate_synthetic_insar_data(size=5000, time_steps=5)
+print(insar_df.head())
+
+## 2. Data Visualization
+
+def plot_insar_data(df, time_step=0):
+    """Visualize the synthetic InSAR data for a given time step"""
+    subset = df[df['time'] == time_step]
+    
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(1, 2, 1)
+    plt.scatter(subset['x'], subset['y'], c=subset['phase'], cmap='jet', s=10)
+    plt.colorbar(label='Phase (radians)')
+    plt.title(f'Interferogram Phase (Time {time_step})')
+    
+    plt.subplot(1, 2, 2)
+    plt.scatter(subset['x'], subset['y'], c=subset['true_deformation'], cmap='jet', s=10)
+    plt.colorbar(label='Deformation (m)')
+    plt.title(f'True Deformation (Time {time_step})')
+    
+    plt.tight_layout()
+    plt.show()
+
+plot_insar_data(insar_df, time_step=2)
+
+## 3. Feature Engineering
+
+def create_features(df):
+    """Create features for machine learning model"""
+    
+    # Spatial features
+    df['distance_to_center'] = np.sqrt((df['x']-5)**2 + (df['y']-5)**2)
+    df['angle_to_center'] = np.arctan2(df['y']-5, df['x']-5)
+    
+    # Temporal features
+    df['time_squared'] = df['time'] ** 2
+    
+    # Neighborhood statistics (simulating spatial context)
+    # In a real implementation, you would use actual spatial aggregation
+    df['mean_phase_100m'] = gaussian(df['phase'].values.reshape(100,50), sigma=1).flatten()[:len(df)]
+    df['std_phase_100m'] = gaussian(np.random.normal(size=len(df)), sigma=1).flatten() * 0.2
+    
+    return df
+
+insar_df = create_features(insar_df)
+
+## 4. Machine Learning Model for Deformation Prediction
+
+def train_deformation_model(df):
+    """Train a machine learning model to predict deformation from phase data"""
+    
+    # Prepare features and target
+    features = ['x', 'y', 'time', 'phase', 'distance_to_center', 
+                'angle_to_center', 'time_squared', 'mean_phase_100m', 'std_phase_100m']
+    target = 'true_deformation'
+    
+    X = df[features]
+    y = df[target]
+    
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    # Train model
+    model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+    model.fit(X_train, y_train)
+    
+    # Evaluate
+    y_pred = model.predict(X_test)
+    mse = mean_squared_error(y_test, y_pred)
+    print(f"Model MSE: {mse:.4f}")
+    print(f"Feature importances: {dict(zip(features, model.feature_importances_))}")
+    
+    return model
+
+# Train the model
+deformation_model = train_deformation_model(insar_df)
+
+## 5. Deformation Monitoring Over Time
+
+def monitor_deformation(df, model):
+    """Monitor deformation over time using the trained model"""
+    
+    time_steps = df['time'].unique()
+    
+    plt.figure(figsize=(15, 5*len(time_steps)))
+    
+    for i, t in enumerate(time_steps):
+        subset = df[df['time'] == t]
+        X = subset[model.feature_names_in_]
+        preds = model.predict(X)
+        
+        plt.subplot(len(time_steps), 2, 2*i+1)
+        plt.scatter(subset['x'], subset['y'], c=subset['phase'], cmap='jet', s=10)
+        plt.colorbar(label='Phase (radians)')
+        plt.title(f'Input Phase (Time {t})')
+        
+        plt.subplot(len(time_steps), 2, 2*i+2)
+        plt.scatter(subset['x'], subset['y'], c=preds, cmap='jet', s=10)
+        plt.colorbar(label='Predicted Deformation (m)')
+        plt.title(f'Predicted Deformation (Time {t})')
+    
+    plt.tight_layout()
+    plt.show()
+
+monitor_deformation(insar_df, deformation_model)
+
+## 6. Anomaly Detection in Deformation Patterns
+
+from sklearn.ensemble import IsolationForest
+
+def detect_anomalies(df, model):
+    """Detect anomalous deformation patterns"""
+    
+    # Predict deformation for all points
+    X = df[model.feature_names_in_]
+    df['predicted_deformation'] = model.predict(X)
+    
+    # Calculate residuals
+    df['residual'] = df['predicted_deformation'] - df['true_deformation']
+    
+    # Train anomaly detection model on residuals
+    anomaly_model = IsolationForest(contamination=0.01, random_state=42)
+    anomalies = anomaly_model.fit_predict(df[['residual']])
+    df['anomaly'] = anomalies == -1
+    
+    # Plot anomalies
+    plt.figure(figsize=(10, 8))
+    normal = df[~df['anomaly']]
+    anomalous = df[df['anomaly']]
+    
+    plt.scatter(normal['x'], normal['y'], c=normal['true_deformation'], 
+                cmap='jet', s=5, label='Normal')
+    plt.scatter(anomalous['x'], anomalous['y'], c='black', 
+                s=50, marker='x', label='Anomaly')
+    
+    plt.colorbar(label='Deformation (m)')
+    plt.legend()
+    plt.title('Detected Anomalies in Deformation Pattern')
+    plt.show()
+    
+    return df
+
+# Detect anomalies
+insar_df = detect_anomalies(insar_df, deformation_model)
